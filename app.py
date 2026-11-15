@@ -299,8 +299,5 @@ def _bg_boot():
     MAIN_LOOP.run_forever()
 
 if __name__ == "__main__":
-    print("═" * 60)
-    print("   YASIN × BHAI — MULTI-REGION EMOTE API")
-    print("═" * 60)
-    threading.Thread(target=_bg_boot, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
