@@ -274,7 +274,7 @@ def emote():
         }), 500
 
 # ═══════════════════════════════════════════════════════════════
-# ★ STARTUP (Single Clean Function)
+# ★ STARTUP
 # ═══════════════════════════════════════════════════════════════
 def _bg_boot():
     global MAIN_LOOP
@@ -289,7 +289,7 @@ def _bg_boot():
                 except Exception as e:
                     print(f"❌ {region} Bot failed during init: {e}")
 
-    # বটগুলো লগইন হতে ৪-৫ মিনিট সময় নিতে পারে, তাই টাইমআউট ৩০০ সেকেন্ড (৫ মিনিট) করা হলো
+    # বটগুলো লগইন হতে ৫ মিনিট পর্যন্ত সময় নিতে পারে
     fut = asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
     try:
         fut.result(timeout=300)  
@@ -299,5 +299,11 @@ def _bg_boot():
     MAIN_LOOP.run_forever()
 
 if __name__ == "__main__":
+    print("═" * 60)
+    print("   YASIN × BHAI — MULTI-REGION EMOTE API")
+    print("═" * 60)
+    # ⚡ এই লাইনটা মিসিং ছিল, এটা ছাড়া বট লগইন হবে না
+    threading.Thread(target=_bg_boot, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
