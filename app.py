@@ -17,6 +17,9 @@ from Crypto.Util.Padding import pad
 import login_engine
 import bot_uid_pass
 from xC4 import Emote_k, JoinSquadByTeamCode, ExiT
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ═══════════════════════════════════════════════════════════════
 # ★ HELPER: Online Auth Builder
