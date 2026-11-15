@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# app.py — YASIN × BHAI EMOTE API (Multi-Region Auto Join & Leave)
+# app.py — YASIN × BHAI EMOTE API (Silent Monitor & Auto-Reconnect)
 # ═══════════════════════════════════════════════════════════════
 
 import asyncio
@@ -39,6 +39,7 @@ def build_ob55_online_auth(account_uid, token, kts, key, iv):
 # ★ GLOBAL BOT STATE
 # ═══════════════════════════════════════════════════════════════
 BOT_STATE = {}  
+RECONNECTING = set() 
 
 app = Flask(__name__)
 CORS(app)
@@ -57,7 +58,7 @@ def run_async(coro):
     return fut.result(timeout=60)
 
 # ═══════════════════════════════════════════════════════════════
-# ★ LOGIN FOR A SINGLE REGION (Auto-Reconnect Fixed)
+# ★ LOGIN & CONNECTOR
 # ═══════════════════════════════════════════════════════════════
 async def _login_region(region_code, uid, pw):
     print(f"🔐 Logging in {region_code} bot UID={uid} ...")
@@ -105,11 +106,12 @@ async def _login_region(region_code, uid, pw):
                     key, iv,
                 )
 
+                # নতুন কানেকশন তৈরি
                 reader, writer = await asyncio.open_connection(online_ip, int(online_port))
                 writer.write(online_token_bytes)
                 await writer.drain()
 
-                # পুরানো লেখক থাকলে বন্ধ করা
+                # পুরানো কানেকশন ক্লোজ
                 if BOT_STATE.get(region_code, {}).get("writer"):
                     try:
                         BOT_STATE[region_code]["writer"].close()
@@ -123,7 +125,7 @@ async def _login_region(region_code, uid, pw):
                     "iv":          iv,
                     "region":      actual_region,
                     "writer":      writer,
-                    "lock":        asyncio.Lock(), # নতুন লক তৈরি
+                    "lock":        asyncio.Lock(),
                 }
                 print(f"✅ {region_code} Bot online → {online_ip}:{online_port} | UID={major_res.account_uid}")
                 return
@@ -133,58 +135,39 @@ async def _login_region(region_code, uid, pw):
             if attempt < 1:
                 await asyncio.sleep(1)
             else:
-                if region_code not in BOT_STATE:
-                    BOT_STATE[region_code] = {"logged_in": False}
-                else:
-                    BOT_STATE[region_code]["logged_in"] = False
+                BOT_STATE[region_code] = {"logged_in": False}
                 print(f"❌ {region_code} Bot failed.")
-                
-# ═══════════════════════════════════════════════════════════════
-# ★ BACKGROUND CONNECTION MONITOR (Auto-Reconnect)
-# ═══════════════════════════════════════════════════════════════
-async def _keep_alive_monitor():
-    """প্রতি ১০ সেকেন্ড পর পর চেক করবে কানেকশন কেটে গেছে কিনা"""
-    while True:
-        await asyncio.sleep(10)
-        for region, state in BOT_STATE.items():
-            # যদি বট অফলাইন থাকে বা রাইটার ক্লোজ হয়ে যায়
-            if not state.get("logged_in") or not state.get("writer") or state["writer"].is_closing():
-                print(f"🔄 {region} Connection lost or closed. Auto-reconnecting...")
-                creds = bot_uid_pass.REGION_BOTS.get(region)
-                if creds and creds.get("uid") and creds.get("password"):
-                    await _login_region(region, creds["uid"], creds["password"])
 
 # ═══════════════════════════════════════════════════════════════
-# ★ BACKGROUND BOOT LOGIC
-# ═══════════════════════════════════════════════════════════════
-def _bg_boot():
-    global MAIN_LOOP
-    MAIN_LOOP = start_async_loop()
-    
-    async def _init_all_bots():
-        print("🚀 Starting Multi-Region Bot Initialization...")
-        for region, creds in bot_uid_pass.REGION_BOTS.items():
-            if creds["uid"] and creds["password"]:
-                try:
-                    await _login_region(region, creds["uid"], creds["password"])
-                    await asyncio.sleep(0.5) 
-                except Exception as e:
-                    print(f"❌ {region} Bot failed during init: {e}")
-        
-        # ⚡ সব বট লগইন হওয়া শেষ হলে মনিটর চালু হবে
-        asyncio.create_task(_keep_alive_monitor())
-
-    asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
-    MAIN_LOOP.run_forever()                
-
-# ═══════════════════════════════════════════════════════════════
-# ★ EMOTE & SQUAD ACTIONS
+# ★ SEND ACTIONS (প্যাকেট পাঠানোর সময় কানেকশন চেক)
 # ═══════════════════════════════════════════════════════════════
 async def _send_packet(region_code, pkt):
-    if not BOT_STATE.get(region_code, {}).get("logged_in") or not BOT_STATE[region_code].get("writer"):
-        raise RuntimeError(f"{region_code} Bot offline")
-    BOT_STATE[region_code]["writer"].write(pkt)
-    await BOT_STATE[region_code]["writer"].drain()
+    state = BOT_STATE.get(region_code, {})
+    
+    # ১. কানেকশন ডেড থাকলে আগে রি-কানেক্ট করো
+    if not state.get("logged_in") or not state.get("writer") or state["writer"].is_closing():
+        print(f"⚠️ {region_code} Connection dead during send. Reconnecting...")
+        creds = bot_uid_pass.REGION_BOTS.get(region_code)
+        if creds:
+            await _login_region(region_code, creds["uid"], creds["password"])
+            state = BOT_STATE.get(region_code, {})
+            if not state.get("logged_in"):
+                raise RuntimeError(f"{region_code} failed to reconnect")
+
+    # ২. প্যাকেট পাঠাও
+    try:
+        state["writer"].write(pkt)
+        await state["writer"].drain()
+    except Exception as e:
+        # পাঠানোর সময় হঠাৎ কেটে গেলে আবার রি-কানেক্ট করে পাঠাও
+        print(f"⚠️ {region_code} Send failed: {e}. Reconnecting and retrying...")
+        creds = bot_uid_pass.REGION_BOTS.get(region_code)
+        if creds:
+            await _login_region(region_code, creds["uid"], creds["password"])
+            state = BOT_STATE.get(region_code, {})
+            if state.get("logged_in") and state.get("writer"):
+                state["writer"].write(pkt)
+                await state["writer"].drain()
 
 async def _send_emote_async(region_code, target_uid, emote_id):
     state = BOT_STATE[region_code]
@@ -208,23 +191,14 @@ def health():
 def emote():
     try:
         args = request.args.to_dict()
-
         emote_id_str = args.get("emote_id") or args.get("emote") or ""
         server_name  = (args.get("server_name") or args.get("region") or "").upper()
         team_code    = args.get("team_code") or args.get("teamcode") or ""
 
-        if not emote_id_str.isdigit():
-            return jsonify({"success": False, "error": "emote_id missing"}), 400
-        
-        if not server_name or server_name not in bot_uid_pass.SUPPORTED_REGIONS:
-            return jsonify({"success": False, "error": "Invalid server_name"}), 400
-        
-        if not team_code:
-            return jsonify({"success": False, "error": "team_code is required"}), 400
+        if not emote_id_str.isdigit() or not server_name or not team_code:
+            return jsonify({"success": False, "error": "Missing parameters"}), 400
 
         emote_id = int(emote_id_str)
-
-        # Target UID List
         targets = []
         if args.get("uid") and str(args["uid"]).isdigit():
             targets.append(str(args["uid"]))
@@ -235,72 +209,75 @@ def emote():
 
         seen = set()
         targets = [u for u in targets if not (u in seen or seen.add(u))]
-
-        if not targets:
-            return jsonify({"success": False, "error": "No valid uid provided"}), 400
-
-        # Check if bot is online
+        if not targets: return jsonify({"success": False, "error": "No valid uid"}), 400
+        
         if not BOT_STATE.get(server_name, {}).get("logged_in"):
             return jsonify({"success": False, "error": f"{server_name} bot is offline"}), 503
 
         results = []
         started = time.time()
-        
-        key = BOT_STATE[server_name]["key"]
-        iv = BOT_STATE[server_name]["iv"]
-        actual_region = BOT_STATE[server_name]["region"]
-        bot_uid = int(BOT_STATE[server_name]["bot_uid"])
 
         async def _run():
+            # এখানে সরাসরি BOT_STATE থেকে ডাটা নেওয়া হচ্ছে, কারণ _send_packet নিজেই রি-কানেক্ট হ্যান্ডেল করে
             lock = BOT_STATE[server_name]["lock"]
             async with lock:
-                # ১. গ্রুপে জয়েন করা
+                state = BOT_STATE[server_name]
+                
                 try:
-                    join_pkt = await JoinSquadByTeamCode(team_code, key, iv, actual_region)
+                    join_pkt = await JoinSquadByTeamCode(team_code, state["key"], state["iv"], state["region"])
                     await _send_packet(server_name, join_pkt)
-                    print(f"✅ {server_name} Bot joining squad: {team_code}...")
-                    # ⚡ FIX: গেমে পুরোপুরি ঢোকার জন্য ৩ সেকেন্ড অপেক্ষা
                     await asyncio.sleep(1.5) 
                 except Exception as e:
                     print(f"❌ {server_name} Failed to join squad: {e}")
 
-                # ২. ইমোট পাঠানো
                 for uid in targets:
                     try:
+                        # _send_emote_async ভেতরে _send_packet কল করবে, যা দরকার হলে রি-কানেক্ট করবে
                         await _send_emote_async(server_name, uid, emote_id)
                         results.append({"uid": uid, "sent": True})
-                        print(f"🎭 {server_name} Emote {emote_id} sent to {uid}")
                     except Exception as e:
                         results.append({"uid": uid, "sent": False, "error": str(e)[:120]})
-                    await asyncio.sleep(0.3) # ইমোটগুলোর মাঝে ০.৩ সেকেন্ড গ্যাপ
+                    await asyncio.sleep(0.3) 
                 
-                # ৩. গ্রুপ থেকে লিভ নেওয়া
                 try:
-                    exit_pkt = await ExiT(bot_uid, key, iv)
+                    state = BOT_STATE[server_name]
+                    exit_pkt = await ExiT(int(state["bot_uid"]), state["key"], state["iv"])
                     await _send_packet(server_name, exit_pkt)
-                    print(f"🚪 {server_name} Bot left the squad.")
-                except Exception as e:
-                    print(f"❌ {server_name} Failed to leave squad: {e}")
+                except Exception:
+                    pass
 
         run_async(_run())
 
         ok_count = sum(1 for r in results if r["sent"])
-        return jsonify({
-            "success":     ok_count > 0,
-            "emote_id":    emote_id,
-            "server_name": server_name,
-            "team_code":   team_code,
-            "sent":        ok_count,
-            "results":     results,
-            "elapsed_sec": round(time.time() - started, 3),
-        })
+        return jsonify({"success": ok_count > 0, "sent": ok_count, "results": results})
 
     except Exception as e:
-        print(f"❌ /emote error:\n{traceback.format_exc()}")
         return jsonify({"success": False, "error": str(e)[:200]}), 500
 
 # ═══════════════════════════════════════════════════════════════
-# ★ BACKGROUND BOOT LOGIC (Fast & Immediate Start)
+# ★ SILENT BACKGROUND MONITOR (কোনো প্যাকেট পাঠাবে না)
+# ═══════════════════════════════════════════════════════════════
+async def _silent_connection_monitor():
+    """প্রতি ৫ সেকেন্ড পর পর চেক করবে writer মৃত কিনা, কোনো প্যাকেট পাঠাবে না"""
+    while True:
+        await asyncio.sleep(5) 
+        
+        for region, state in BOT_STATE.items():
+            if region in RECONNECTING:
+                continue
+
+            # শুধু is_closing() চেক করবে, কোনো প্যাকেট পাঠাবে না
+            if not state.get("logged_in") or not state.get("writer") or state["writer"].is_closing():
+                RECONNECTING.add(region)
+                print(f"🔄 {region} silently detected dead. Reconnecting...")
+                creds = bot_uid_pass.REGION_BOTS.get(region)
+                if creds and creds.get("uid") and creds.get("password"):
+                    await _login_region(region, creds["uid"], creds["password"])
+                    await asyncio.sleep(2) 
+                RECONNECTING.discard(region)
+
+# ═══════════════════════════════════════════════════════════════
+# ★ BOOT LOGIC
 # ═══════════════════════════════════════════════════════════════
 def _bg_boot():
     global MAIN_LOOP
@@ -312,28 +289,20 @@ def _bg_boot():
             if creds["uid"] and creds["password"]:
                 try:
                     await _login_region(region, creds["uid"], creds["password"])
-                    # ⚡ FIX: বটগুলোর মাঝে গ্যাপ কমানো হলো যাতে দ্রুত অনলাইন হয়
-                    await asyncio.sleep(0.5) 
+                    await asyncio.sleep(1.0) 
                 except Exception as e:
                     print(f"❌ {region} Bot failed during init: {e}")
+        
+        # সাইলেন্ট মনিটর চালু
+        asyncio.create_task(_silent_connection_monitor())
 
-    # ব্যাকগ্রাউন্ডে বটগুলো লগইন শুরু হবে
     asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
-    
-    # ইভেন্ট লুপ চালু রাখা
     MAIN_LOOP.run_forever()
 
-# ═══════════════════════════════════════════════════════════════
-# ★ APP STARTUP (Render Friendly)
-# ═══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("═" * 60)
     print("   YASIN × BHAI — MULTI-REGION EMOTE API")
     print("═" * 60)
-    
-    # ⚡ FIX: Flask অ্যাপ রান করার আগেই ব্যাকগ্রাউন্ড থ্রেড চালু হবে
-    bg_thread = threading.Thread(target=_bg_boot, daemon=True)
-    bg_thread.start()
-    
+    threading.Thread(target=_bg_boot, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
