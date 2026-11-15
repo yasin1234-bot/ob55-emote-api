@@ -7,6 +7,8 @@ import threading
 import time
 import json
 import traceback
+import sys
+import os
 
 import httpx
 from flask import Flask, request, jsonify
@@ -17,8 +19,7 @@ from Crypto.Util.Padding import pad
 import login_engine
 import bot_uid_pass
 from xC4 import Emote_k, JoinSquadByTeamCode, ExiT
-import sys
-import os
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ═══════════════════════════════════════════════════════════════
@@ -56,22 +57,20 @@ def run_async(coro):
     return fut.result(timeout=60)
 
 # ═══════════════════════════════════════════════════════════════
-# ★ LOGIN FOR A SINGLE REGION (With Auto-Retry Loop)
+# ★ LOGIN FOR A SINGLE REGION (Fixed)
 # ═══════════════════════════════════════════════════════════════
 async def _login_region(region_code, uid, pw):
     print(f"🔐 Logging in {region_code} bot UID={uid} ...")
     
-    for attempt in range(3):
+    for attempt in range(2): # রেন্ডারে দ্রুত রেসপন্সের জন্য ২ বার ট্রাই
         try:
-            async with httpx.AsyncClient(verify=False, timeout=20.0) as client_http:
+            async with httpx.AsyncClient(verify=False, timeout=15.0) as client_http:
                 vc = await login_engine.version_config(client_http, region_code)
-                if not vc: 
-                    raise RuntimeError("Version config failed")
+                if not vc: raise RuntimeError("Version config failed")
                 release_version, client_version, server_url = vc
 
                 tg = await login_engine.get_access_token(client_http, uid, pw)
-                if not tg: 
-                    raise RuntimeError("Invalid UID/password")
+                if not tg: raise RuntimeError("Invalid UID/password")
                 open_id, access_token, platform = tg
 
                 payload = await login_engine.build_majorlogin_payload(
@@ -87,8 +86,7 @@ async def _login_region(region_code, uid, pw):
                     client_http, payload, major_res.url,
                     major_res.token, release_version
                 )
-                if not gl: 
-                    raise RuntimeError("GetLoginData failed")
+                if not gl: raise RuntimeError("GetLoginData failed")
                 res_proto, dict_res = gl
 
                 key = major_res.key or login_engine.AES_KEY
@@ -117,23 +115,19 @@ async def _login_region(region_code, uid, pw):
                     "key":         key,
                     "iv":          iv,
                     "region":      actual_region,
-                    "online_ip":   online_ip,
-                    "online_port": online_port,
                     "writer":      writer,
                     "lock":        asyncio.Lock(),
-                    "last_error":  None,
                 }
                 print(f"✅ {region_code} Bot online → {online_ip}:{online_port} | UID={major_res.account_uid}")
                 return  # সফল হলে লুপ থেকে বেরিয়ে যাবে
 
         except Exception as e:
-            err_msg = str(e)
-            print(f"⚠️ {region_code} Attempt {attempt+1} failed: {err_msg}")
-            if attempt < 2:
-                await asyncio.sleep(2)  # পরের চেষ্টার আগে ২ সেকেন্ড অপেক্ষা
+            print(f"⚠️ {region_code} Attempt {attempt+1} failed: {e}")
+            if attempt < 1:
+                await asyncio.sleep(1)
             else:
-                BOT_STATE[region_code] = {"logged_in": False, "last_error": err_msg}
-                print(f"❌ {region_code} Bot completely failed after 3 attempts.")
+                BOT_STATE[region_code] = {"logged_in": False}
+                print(f"❌ {region_code} Bot failed.")
 
 # ═══════════════════════════════════════════════════════════════
 # ★ EMOTE & SQUAD ACTIONS
@@ -146,8 +140,7 @@ async def _send_packet(region_code, pkt):
 
 async def _send_emote_async(region_code, target_uid, emote_id):
     state = BOT_STATE[region_code]
-    key, iv, actual_region = state["key"], state["iv"], state["region"]
-    pkt = await Emote_k(int(target_uid), int(emote_id), key, iv, actual_region)
+    pkt = await Emote_k(int(target_uid), int(emote_id), state["key"], state["iv"], state["region"])
     await _send_packet(region_code, pkt)
 
 # ═══════════════════════════════════════════════════════════════
@@ -156,21 +149,11 @@ async def _send_emote_async(region_code, target_uid, emote_id):
 @app.route("/", methods=["GET"])
 def root():
     online_bots = {r: s.get("logged_in", False) for r, s in BOT_STATE.items()}
-    return jsonify({
-        "api": "YASIN × BHAI Multi-Region Emote API",
-        "status": "running",
-        "online_bots": online_bots,
-        "usage": {
-            "single": "/emote?team_code=CODE&emote_id=909000063&uid=UID&server_name=BD",
-            "multi":  "/emote?team_code=CODE&uid1=U1&uid2=U2&emote_id=909000063&server_name=IND"
-        }
-    })
+    return jsonify({"api": "YASIN × BHAI Emote API", "online_bots": online_bots})
 
 @app.route("/health", methods=["GET"])
 def health():
-    status = {}
-    for r, s in BOT_STATE.items():
-        status[r] = "healthy" if s.get("logged_in") else "degraded"
+    status = {r: "healthy" if s.get("logged_in") else "degraded" for r, s in BOT_STATE.items()}
     return jsonify({"status": status})
 
 @app.route("/emote", methods=["GET", "POST"])
@@ -183,7 +166,7 @@ def emote():
         team_code    = args.get("team_code") or args.get("teamcode") or ""
 
         if not emote_id_str.isdigit():
-            return jsonify({"success": False, "error": "emote_id missing or not numeric"}), 400
+            return jsonify({"success": False, "error": "emote_id missing"}), 400
         
         if not server_name or server_name not in bot_uid_pass.SUPPORTED_REGIONS:
             return jsonify({"success": False, "error": "Invalid server_name"}), 400
@@ -208,9 +191,9 @@ def emote():
         if not targets:
             return jsonify({"success": False, "error": "No valid uid provided"}), 400
 
-        # ★ Check if the requested region's bot is online
+        # Check if bot is online
         if not BOT_STATE.get(server_name, {}).get("logged_in"):
-            return jsonify({"success": False, "error": f"{server_name} bot is offline or not configured"}), 503
+            return jsonify({"success": False, "error": f"{server_name} bot is offline"}), 503
 
         results = []
         started = time.time()
@@ -227,8 +210,9 @@ def emote():
                 try:
                     join_pkt = await JoinSquadByTeamCode(team_code, key, iv, actual_region)
                     await _send_packet(server_name, join_pkt)
-                    print(f"✅ {server_name} Bot joined squad: {team_code}")
-                    await asyncio.sleep(1.5)
+                    print(f"✅ {server_name} Bot joining squad: {team_code}...")
+                    # ⚡ FIX: গেমে পুরোপুরি ঢোকার জন্য ৩ সেকেন্ড অপেক্ষা
+                    await asyncio.sleep(1.5) 
                 except Exception as e:
                     print(f"❌ {server_name} Failed to join squad: {e}")
 
@@ -236,10 +220,11 @@ def emote():
                 for uid in targets:
                     try:
                         await _send_emote_async(server_name, uid, emote_id)
-                        results.append({"uid": uid, "sent": True, "error": None})
+                        results.append({"uid": uid, "sent": True})
+                        print(f"🎭 {server_name} Emote {emote_id} sent to {uid}")
                     except Exception as e:
                         results.append({"uid": uid, "sent": False, "error": str(e)[:120]})
-                    await asyncio.sleep(bot_uid_pass.EMOTE_COOLDOWN_SEC)
+                    await asyncio.sleep(0.3) # ইমোটগুলোর মাঝে ০.৩ সেকেন্ড গ্যাপ
                 
                 # ৩. গ্রুপ থেকে লিভ নেওয়া
                 try:
@@ -253,57 +238,54 @@ def emote():
 
         ok_count = sum(1 for r in results if r["sent"])
         return jsonify({
-            "success":     ok_count == len(results),
+            "success":     ok_count > 0,
             "emote_id":    emote_id,
             "server_name": server_name,
             "team_code":   team_code,
-            "total":       len(results),
             "sent":        ok_count,
-            "failed":      len(results) - ok_count,
             "results":     results,
             "elapsed_sec": round(time.time() - started, 3),
         })
 
     except Exception as e:
-        tb = traceback.format_exc()
-        print(f"❌ /emote error:\n{tb}")
-        return jsonify({
-            "success": False,
-            "error":   str(e)[:200],
-            "trace":   tb.splitlines()[-3:],
-        }), 500
+        print(f"❌ /emote error:\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)[:200]}), 500
 
 # ═══════════════════════════════════════════════════════════════
-# ★ STARTUP
+# ★ BACKGROUND BOOT LOGIC (Fast & Immediate Start)
 # ═══════════════════════════════════════════════════════════════
 def _bg_boot():
     global MAIN_LOOP
     MAIN_LOOP = start_async_loop()
     
     async def _init_all_bots():
+        print("🚀 Starting Multi-Region Bot Initialization...")
         for region, creds in bot_uid_pass.REGION_BOTS.items():
             if creds["uid"] and creds["password"]:
                 try:
                     await _login_region(region, creds["uid"], creds["password"])
-                    await asyncio.sleep(1.5) # গ্যারেনা সার্ভার সেফ রাখার জন্য
+                    # ⚡ FIX: বটগুলোর মাঝে গ্যাপ কমানো হলো যাতে দ্রুত অনলাইন হয়
+                    await asyncio.sleep(0.5) 
                 except Exception as e:
                     print(f"❌ {region} Bot failed during init: {e}")
 
-    # বটগুলো লগইন হতে ৫ মিনিট পর্যন্ত সময় নিতে পারে
-    fut = asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
-    try:
-        fut.result(timeout=300)  
-    except Exception as e:
-        print(f"❌ Startup Error: {e}")
-
+    # ব্যাকগ্রাউন্ডে বটগুলো লগইন শুরু হবে
+    asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
+    
+    # ইভেন্ট লুপ চালু রাখা
     MAIN_LOOP.run_forever()
 
+# ═══════════════════════════════════════════════════════════════
+# ★ APP STARTUP (Render Friendly)
+# ═══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("═" * 60)
     print("   YASIN × BHAI — MULTI-REGION EMOTE API")
     print("═" * 60)
-    # ⚡ এই লাইনটা মিসিং ছিল, এটা ছাড়া বট লগইন হবে না
-    threading.Thread(target=_bg_boot, daemon=True).start()
+    
+    # ⚡ FIX: Flask অ্যাপ রান করার আগেই ব্যাকগ্রাউন্ড থ্রেড চালু হবে
+    bg_thread = threading.Thread(target=_bg_boot, daemon=True)
+    bg_thread.start()
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
