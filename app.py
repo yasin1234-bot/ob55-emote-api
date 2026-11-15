@@ -57,12 +57,12 @@ def run_async(coro):
     return fut.result(timeout=60)
 
 # ═══════════════════════════════════════════════════════════════
-# ★ LOGIN FOR A SINGLE REGION (Fixed)
+# ★ LOGIN FOR A SINGLE REGION (Auto-Reconnect Fixed)
 # ═══════════════════════════════════════════════════════════════
 async def _login_region(region_code, uid, pw):
     print(f"🔐 Logging in {region_code} bot UID={uid} ...")
     
-    for attempt in range(2): # রেন্ডারে দ্রুত রেসপন্সের জন্য ২ বার ট্রাই
+    for attempt in range(2):
         try:
             async with httpx.AsyncClient(verify=False, timeout=15.0) as client_http:
                 vc = await login_engine.version_config(client_http, region_code)
@@ -109,6 +109,13 @@ async def _login_region(region_code, uid, pw):
                 writer.write(online_token_bytes)
                 await writer.drain()
 
+                # পুরানো লেখক থাকলে বন্ধ করা
+                if BOT_STATE.get(region_code, {}).get("writer"):
+                    try:
+                        BOT_STATE[region_code]["writer"].close()
+                    except:
+                        pass
+
                 BOT_STATE[region_code] = {
                     "logged_in":   True,
                     "bot_uid":     str(major_res.account_uid),
@@ -116,18 +123,59 @@ async def _login_region(region_code, uid, pw):
                     "iv":          iv,
                     "region":      actual_region,
                     "writer":      writer,
-                    "lock":        asyncio.Lock(),
+                    "lock":        asyncio.Lock(), # নতুন লক তৈরি
                 }
                 print(f"✅ {region_code} Bot online → {online_ip}:{online_port} | UID={major_res.account_uid}")
-                return  # সফল হলে লুপ থেকে বেরিয়ে যাবে
+                return
 
         except Exception as e:
             print(f"⚠️ {region_code} Attempt {attempt+1} failed: {e}")
             if attempt < 1:
                 await asyncio.sleep(1)
             else:
-                BOT_STATE[region_code] = {"logged_in": False}
+                if region_code not in BOT_STATE:
+                    BOT_STATE[region_code] = {"logged_in": False}
+                else:
+                    BOT_STATE[region_code]["logged_in"] = False
                 print(f"❌ {region_code} Bot failed.")
+                
+# ═══════════════════════════════════════════════════════════════
+# ★ BACKGROUND CONNECTION MONITOR (Auto-Reconnect)
+# ═══════════════════════════════════════════════════════════════
+async def _keep_alive_monitor():
+    """প্রতি ১০ সেকেন্ড পর পর চেক করবে কানেকশন কেটে গেছে কিনা"""
+    while True:
+        await asyncio.sleep(10)
+        for region, state in BOT_STATE.items():
+            # যদি বট অফলাইন থাকে বা রাইটার ক্লোজ হয়ে যায়
+            if not state.get("logged_in") or not state.get("writer") or state["writer"].is_closing():
+                print(f"🔄 {region} Connection lost or closed. Auto-reconnecting...")
+                creds = bot_uid_pass.REGION_BOTS.get(region)
+                if creds and creds.get("uid") and creds.get("password"):
+                    await _login_region(region, creds["uid"], creds["password"])
+
+# ═══════════════════════════════════════════════════════════════
+# ★ BACKGROUND BOOT LOGIC
+# ═══════════════════════════════════════════════════════════════
+def _bg_boot():
+    global MAIN_LOOP
+    MAIN_LOOP = start_async_loop()
+    
+    async def _init_all_bots():
+        print("🚀 Starting Multi-Region Bot Initialization...")
+        for region, creds in bot_uid_pass.REGION_BOTS.items():
+            if creds["uid"] and creds["password"]:
+                try:
+                    await _login_region(region, creds["uid"], creds["password"])
+                    await asyncio.sleep(0.5) 
+                except Exception as e:
+                    print(f"❌ {region} Bot failed during init: {e}")
+        
+        # ⚡ সব বট লগইন হওয়া শেষ হলে মনিটর চালু হবে
+        asyncio.create_task(_keep_alive_monitor())
+
+    asyncio.run_coroutine_threadsafe(_init_all_bots(), MAIN_LOOP)
+    MAIN_LOOP.run_forever()                
 
 # ═══════════════════════════════════════════════════════════════
 # ★ EMOTE & SQUAD ACTIONS
