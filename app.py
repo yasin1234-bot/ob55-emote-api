@@ -37,12 +37,12 @@ def build_ob55_online_auth(account_uid, token, kts, key, iv):
     return opcode + uid_bytes + kts_bytes + len_bytes + enc_token, enc_token
 
 # ═══════════════════════════════════════════════════════════════
-# ★ CORE FUNCTION (Login -> Join -> Emote -> Auto Close)
+# ★ CORE FUNCTION (Login -> Join -> Emote -> Leave)
 # ═══════════════════════════════════════════════════════════════
 async def run_live_emote(region_code, uid, pw, team_code, emote_id, targets):
     print(f"🔐 [{region_code}] Logging in bot UID={uid} ...")
     
-    # ১. লগইন প্রসেস (সবচেয়ে ফাস্ট টাইমআউট দিয়ে)
+    # ১. লগইন প্রসেস
     async with httpx.AsyncClient(verify=False, timeout=10.0) as client_http:
         vc = await login_engine.version_config(client_http, region_code)
         if not vc: raise RuntimeError("Version config failed")
@@ -82,7 +82,7 @@ async def run_live_emote(region_code, uid, pw, team_code, emote_id, targets):
             bot_uid, major_res.token, int(major_res.timestamp or time.time()), key, iv
         )
 
-    # ২. TCP কানেকশন ওপেন (সবচেয়ে ফাস্ট)
+    # ২. TCP কানেকশন ওপেন
     reader, writer = await asyncio.open_connection(online_ip, int(online_port))
     writer.write(online_token_bytes)
     await writer.drain()
@@ -95,7 +95,7 @@ async def run_live_emote(region_code, uid, pw, team_code, emote_id, targets):
         await writer.drain()
         print(f"✅ [{region_code}] Bot joining squad: {team_code}...")
         
-        # ⚡ জয়েন হওয়ার জন্য সময় (একদম কমিয়ে ১.২ সেকেন্ড করা হয়েছে যাতে ফাস্ট হয়)
+        # জয়েন হওয়ার জন্য ১.২ সেকেন্ড অপেক্ষা
         await asyncio.sleep(1.2) 
 
         # ৪. ইমোট পাঠানো
@@ -109,18 +109,22 @@ async def run_live_emote(region_code, uid, pw, team_code, emote_id, targets):
                 print(f"🎭 [{region_code}] Emote {emote_id} sent to {target}")
             except Exception as e:
                 results.append({"uid": target, "sent": False, "error": str(e)})
-            await asyncio.sleep(0.15) # ইমোটগুলোর মাঝে গ্যাপ
+            await asyncio.sleep(0.15)
 
-        # ৫. কাজ শেষ, নিজে থেকেই কানেকশন কেটে অফলাইন হয়ে যাওয়া (অটোমেটিক)
-        await asyncio.sleep(0.2)
-        writer.close()
-        await writer.wait_closed()
-        print(f"🚪 [{region_code}] Bot auto-disconnected (Task Complete).")
+        # ৫. ইমোট দেওয়া শেষে গ্রুপ থেকে লিভ নেওয়া
+        try:
+            exit_pkt = await ExiT(bot_uid, key, iv)
+            writer.write(exit_pkt)
+            await writer.drain()
+            print(f"🚪 [{region_code}] Bot left the squad.")
+        except Exception as e:
+            print(f"❌ [{region_code}] Failed to leave squad: {e}")
+
+        # এখানে কোনো writer.close() নেই, সিস্টেম নিজেই কেটে দিবে
 
         return results, bot_uid
 
     except Exception as e:
-        writer.close()
         raise RuntimeError(f"TCP Error: {e}")
 
 # ═══════════════════════════════════════════════════════════════
@@ -132,7 +136,6 @@ def root():
 
 @app.route("/health", methods=["GET"])
 def health():
-    # যেহেতু বট অন-ডিমান্ড, সার্ভার সবসময় রেডি থাকে
     return jsonify({"status": "healthy"})
 
 @app.route("/emote", methods=["GET", "POST"])
@@ -148,7 +151,6 @@ def emote():
 
         emote_id = int(emote_id_str)
         
-        # Target UID List (আপনার আগের কোডের মতোই)
         targets = []
         if args.get("uid") and str(args["uid"]).isdigit():
             targets.append(str(args["uid"]))
@@ -162,14 +164,12 @@ def emote():
         if not targets: 
             return jsonify({"success": False, "error": "No valid uid provided"}), 400
         
-        # কান্ট্রি থেকে বটের আইডি নেওয়া
         creds = bot_uid_pass.REGION_BOTS.get(server_name)
         if not creds or not creds.get("uid") or not creds.get("password"):
             return jsonify({"success": False, "error": f"{server_name} bot credentials not found"}), 404
 
         started = time.time()
         
-        # রিয়েল-টাইম লাইভ রান
         results, bot_uid = asyncio.run(run_live_emote(
             server_name, creds["uid"], creds["password"], team_code, emote_id, targets
         ))
